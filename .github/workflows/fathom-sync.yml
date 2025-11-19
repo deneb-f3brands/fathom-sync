@@ -1,6 +1,6 @@
 name: Fathom → Supabase sync
 
-# Run on a schedule + allow manual runs
+# Run on a schedule + allow manual runs with optional manual since/until
 on:
   workflow_dispatch:
     inputs:
@@ -23,15 +23,13 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     env:
-      # REQUIRED secrets (set in repo settings -> Secrets)
+      # REQUIRED secrets (set in repository -> Settings -> Secrets)
       FUNCTION_URL: ${{ secrets.SUPABASE_FUNCTION_URL }}
       SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       FATHOM_API_KEY: ${{ secrets.FATHOM_API_KEY }}
-      # Optional: prefix used in idempotency key. Default 'fathom-sync'
+      # Optional secrets
       JOB_ID_PREFIX: ${{ secrets.JOB_ID_PREFIX || 'fathom-sync' }}
-      # How far back to fetch when not manually overridden (minutes)
       WINDOW_MINUTES: '55'
-      # chunk size used by the function (if relevant)
       CHUNK_SIZE: '200'
 
     steps:
@@ -41,7 +39,7 @@ jobs:
       - name: Compute time window (UTC)
         id: times
         run: |
-          # If workflow_dispatch provided specific since/until, use them.
+          # If manual inputs provided, use them
           if [ -n "${{ github.event.inputs.since }}" ] && [ -n "${{ github.event.inputs.until }}" ]; then
             echo "Using manual inputs for since/until"
             echo "since=${{ github.event.inputs.since }}" >> $GITHUB_OUTPUT
@@ -50,7 +48,6 @@ jobs:
           fi
 
           WINDOW="${WINDOW_MINUTES}"
-          # Compute ISO timestamps in UTC (GNU date available on ubuntu-latest)
           SINCE=$(date -u -d "$WINDOW minutes ago" +"%Y-%m-%dT%H:%M:%SZ")
           UNTIL=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           echo "since=$SINCE" >> $GITHUB_OUTPUT
@@ -66,7 +63,7 @@ jobs:
           UNTIL="${{ steps.times.outputs.until }}"
           URL="${FUNCTION_URL}"
           SRV="${SERVICE_ROLE}"
-          JOB_PREFIX="${JOB_ID_PREFIX}"
+          JOB_PREFIX="${JOB_ID_PREFIX:-fathom-sync}"
 
           if [ -z "$URL" ] || [ -z "$SRV" ]; then
             echo "ERROR: FUNCTION_URL and SERVICE_ROLE must be set in repository secrets."
@@ -144,4 +141,3 @@ jobs:
           echo "Completed invocation. If success, check Supabase Edge Function logs for detailed UPSERT messages."
           echo "Function URL: ${FUNCTION_URL}"
           echo "Time window: since=${{ steps.times.outputs.since }} until=${{ steps.times.outputs.until }}"
-
