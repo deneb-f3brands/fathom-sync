@@ -16,7 +16,7 @@ jobs:
       FATHOM_API_KEY: ${{ secrets.FATHOM_API_KEY }}
       JOB_ID_PREFIX: ${{ secrets.JOB_ID_PREFIX || 'fathom-sync' }}
       # Adjust window length if desired (minutes)
-      WINDOW_MINUTES: '55'
+      WINDOW_MINUTES: '20'
       CHUNK_SIZE: '200'
     steps:
       - name: Checkout (not required but useful)
