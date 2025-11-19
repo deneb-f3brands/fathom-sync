@@ -1,0 +1,95 @@
+name: Fathom → Supabase sync
+
+# Run on a schedule plus allow manual workflow_dispatch
+on:
+  workflow_dispatch:
+  schedule:
+    # every 15 minutes (adjust as needed). Use UTC cron.
+    - cron: '*/15 * * * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      FUNCTION_URL: ${{ secrets.SUPABASE_FUNCTION_URL }}
+      SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      FATHOM_API_KEY: ${{ secrets.FATHOM_API_KEY }}
+      JOB_ID_PREFIX: ${{ secrets.JOB_ID_PREFIX || 'fathom-sync' }}
+      # Adjust window length if desired (minutes)
+      WINDOW_MINUTES: '55'
+      CHUNK_SIZE: '200'
+    steps:
+      - name: Checkout (not required but useful)
+        uses: actions/checkout@v4
+
+      - name: Compute time window (UTC)
+        id: times
+        run: |
+          # compute since = now - WINDOW_MINUTES, until = now
+          WINDOW="${WINDOW_MINUTES}"
+          SINCE=$(date -u -d "$WINDOW minutes ago" +"%Y-%m-%dT%H:%M:%SZ")
+          UNTIL=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "since=$SINCE" >> $GITHUB_OUTPUT
+          echo "until=$UNTIL" >> $GITHUB_OUTPUT
+          echo "Computed since=$SINCE until=$UNTIL"
+      
+      - name: POST to Supabase function with retries
+        id: invoke
+        run: |
+          set -euo pipefail
+          SINCE="${{ steps.times.outputs.since }}"
+          UNTIL="${{ steps.times.outputs.until }}"
+          URL="${FUNCTION_URL}"
+          SRV="${SERVICE_ROLE}"
+          JOB_PREFIX="${JOB_ID_PREFIX}"
+          BODY=$(jq -n --arg s "$SINCE" --arg u "$UNTIL" '{since:$s, until:$u}')
+          echo "Request body: $BODY"
+          
+          # Retry loop: 3 attempts, exponential backoff (2s, 4s, 8s)
+          ATTEMPT=1
+          MAX=3
+          SUCCESS=0
+          while [ $ATTEMPT -le $MAX ]; do
+            echo "Attempt $ATTEMPT -> POST $URL"
+            # idempotency header helps trace retries
+            IDEMP="$JOB_PREFIX-$(date -u +"%Y%m%dT%H%M%SZ")"
+            HTTP_STATUS=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X POST "$URL" \
+              -H "Content-Type: application/json" \
+              -H "apikey: $SRV" \
+              -H "Authorization: Bearer $SRV" \
+              -H "X-Idempotency-Key: $IDEMP" \
+              -d "$BODY" || true)
+            echo "HTTP status: $HTTP_STATUS"
+            cat /tmp/resp.txt || true
+            if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+              echo "Success (status $HTTP_STATUS)"
+              SUCCESS=1
+              break
+            fi
+            # For 401 fail immediately (bad credentials)
+            if [ "$HTTP_STATUS" -eq 401 ]; then
+              echo "Unauthorized (401) — check secrets. Failing early."
+              exit 1
+            fi
+            # If 429 or 5xx -> retry
+            if [ "$HTTP_STATUS" -eq 429 ] || [ "$HTTP_STATUS" -ge 500 ]; then
+              BACKOFF=$((2 ** ATTEMPT))
+              echo "Transient error ($HTTP_STATUS) — retrying after ${BACKOFF}s"
+              sleep $BACKOFF
+            else
+              # other client errors -> fail
+              echo "Non-retriable HTTP status $HTTP_STATUS; failing"
+              exit 1
+            fi
+            ATTEMPT=$((ATTEMPT+1))
+          done
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "All attempts failed; exiting with code 1"
+            exit 1
+          fi
+
+      - name: Show result (if any)
+        if: always()
+        run: |
+          echo "Invocation complete. Check function logs in Supabase UI for detailed INSERT/UPSERT messages."
