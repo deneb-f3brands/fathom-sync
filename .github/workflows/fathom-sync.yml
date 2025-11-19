@@ -1,95 +1,147 @@
 name: Fathom → Supabase sync
 
-# Run on a schedule plus allow manual workflow_dispatch
+# Run on a schedule + allow manual runs
 on:
   workflow_dispatch:
+    inputs:
+      since:
+        description: 'Optional ISO since timestamp (overrides auto window)'
+        required: false
+        default: ''
+      until:
+        description: 'Optional ISO until timestamp (overrides auto window)'
+        required: false
+        default: ''
   schedule:
-    # every 15 minutes (adjust as needed). Use UTC cron.
+    # every 15 minutes (adjust as needed)
     - cron: '*/15 * * * *'
+
+permissions:
+  contents: read
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     env:
+      # REQUIRED secrets (set in repo settings -> Secrets)
       FUNCTION_URL: ${{ secrets.SUPABASE_FUNCTION_URL }}
       SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       FATHOM_API_KEY: ${{ secrets.FATHOM_API_KEY }}
+      # Optional: prefix used in idempotency key. Default 'fathom-sync'
       JOB_ID_PREFIX: ${{ secrets.JOB_ID_PREFIX || 'fathom-sync' }}
-      # Adjust window length if desired (minutes)
-      WINDOW_MINUTES: '20'
+      # How far back to fetch when not manually overridden (minutes)
+      WINDOW_MINUTES: '55'
+      # chunk size used by the function (if relevant)
       CHUNK_SIZE: '200'
+
     steps:
-      - name: Checkout (not required but useful)
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Compute time window (UTC)
         id: times
         run: |
-          # compute since = now - WINDOW_MINUTES, until = now
+          # If workflow_dispatch provided specific since/until, use them.
+          if [ -n "${{ github.event.inputs.since }}" ] && [ -n "${{ github.event.inputs.until }}" ]; then
+            echo "Using manual inputs for since/until"
+            echo "since=${{ github.event.inputs.since }}" >> $GITHUB_OUTPUT
+            echo "until=${{ github.event.inputs.until }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           WINDOW="${WINDOW_MINUTES}"
+          # Compute ISO timestamps in UTC (GNU date available on ubuntu-latest)
           SINCE=$(date -u -d "$WINDOW minutes ago" +"%Y-%m-%dT%H:%M:%SZ")
           UNTIL=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           echo "since=$SINCE" >> $GITHUB_OUTPUT
           echo "until=$UNTIL" >> $GITHUB_OUTPUT
           echo "Computed since=$SINCE until=$UNTIL"
-      
+
       - name: POST to Supabase function with retries
         id: invoke
         run: |
           set -euo pipefail
+
           SINCE="${{ steps.times.outputs.since }}"
           UNTIL="${{ steps.times.outputs.until }}"
           URL="${FUNCTION_URL}"
           SRV="${SERVICE_ROLE}"
           JOB_PREFIX="${JOB_ID_PREFIX}"
+
+          if [ -z "$URL" ] || [ -z "$SRV" ]; then
+            echo "ERROR: FUNCTION_URL and SERVICE_ROLE must be set in repository secrets."
+            exit 1
+          fi
+
           BODY=$(jq -n --arg s "$SINCE" --arg u "$UNTIL" '{since:$s, until:$u}')
           echo "Request body: $BODY"
-          
-          # Retry loop: 3 attempts, exponential backoff (2s, 4s, 8s)
+
           ATTEMPT=1
-          MAX=3
+          MAX=6
           SUCCESS=0
+          RESP_FILE=/tmp/fathom_resp.txt
+
+          # small random jitter function (100-1000ms)
+          rand_ms() { echo $(( (RANDOM % 900) + 100 )); }
+
           while [ $ATTEMPT -le $MAX ]; do
             echo "Attempt $ATTEMPT -> POST $URL"
-            # idempotency header helps trace retries
-            IDEMP="$JOB_PREFIX-$(date -u +"%Y%m%dT%H%M%SZ")"
-            HTTP_STATUS=$(curl -s -o /tmp/resp.txt -w "%{http_code}" -X POST "$URL" \
+            IDEMP="$JOB_PREFIX-$(date -u +"%Y%m%dT%H%M%SZ")-a${ATTEMPT}"
+            HTTP_STATUS=$(curl -s -o "$RESP_FILE" -w "%{http_code}" -X POST "$URL" \
               -H "Content-Type: application/json" \
               -H "apikey: $SRV" \
               -H "Authorization: Bearer $SRV" \
               -H "X-Idempotency-Key: $IDEMP" \
               -d "$BODY" || true)
+
             echo "HTTP status: $HTTP_STATUS"
-            cat /tmp/resp.txt || true
+            echo "Response (first 300 lines):"
+            sed -n '1,300p' "$RESP_FILE" || true
+
             if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
               echo "Success (status $HTTP_STATUS)"
               SUCCESS=1
               break
             fi
-            # For 401 fail immediately (bad credentials)
+
             if [ "$HTTP_STATUS" -eq 401 ]; then
-              echo "Unauthorized (401) — check secrets. Failing early."
+              echo "Unauthorized (401) — check SERVICE_ROLE and FUNCTION_URL secrets. Failing early."
+              echo "Last response:"
+              sed -n '1,300p' "$RESP_FILE" || true
               exit 1
             fi
-            # If 429 or 5xx -> retry
+
+            # treat 429 and 5xx as transient
             if [ "$HTTP_STATUS" -eq 429 ] || [ "$HTTP_STATUS" -ge 500 ]; then
               BACKOFF=$((2 ** ATTEMPT))
-              echo "Transient error ($HTTP_STATUS) — retrying after ${BACKOFF}s"
+              JITTER_MS=$(rand_ms)
+              echo "Transient error ($HTTP_STATUS) — backoff ${BACKOFF}s + ${JITTER_MS}ms jitter"
               sleep $BACKOFF
+              sleep $(awk "BEGIN {print $JITTER_MS/1000}")
             else
-              # other client errors -> fail
               echo "Non-retriable HTTP status $HTTP_STATUS; failing"
+              echo "Last response:"
+              sed -n '1,300p' "$RESP_FILE" || true
               exit 1
             fi
+
             ATTEMPT=$((ATTEMPT+1))
           done
 
           if [ "$SUCCESS" -ne 1 ]; then
             echo "All attempts failed; exiting with code 1"
+            echo "Last response:"
+            cat "$RESP_FILE" || true
             exit 1
           fi
 
-      - name: Show result (if any)
+          echo "Function invocation succeeded; response:"
+          sed -n '1,500p' "$RESP_FILE" || true
+
+      - name: Show invocation summary (always)
         if: always()
         run: |
-          echo "Invocation complete. Check function logs in Supabase UI for detailed INSERT/UPSERT messages."
+          echo "Completed invocation. If success, check Supabase Edge Function logs for detailed UPSERT messages."
+          echo "Function URL: ${FUNCTION_URL}"
+          echo "Time window: since=${{ steps.times.outputs.since }} until=${{ steps.times.outputs.until }}"
+
