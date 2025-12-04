@@ -1,37 +1,38 @@
 name: refresh-matview
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 jobs:
   call-edge-refresh:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Validate secrets
+      - name: Validate secrets (quick)
         run: |
           if [ -z "${{ secrets.EDGE_REFRESH_URL }}" ]; then
-            echo "❌ Missing EDGE_REFRESH_URL"; exit 1;
+            echo "❌ Missing EDGE_REFRESH_URL (set in repo Settings → Secrets)"; exit 1;
           fi
-
           if [ -z "${{ secrets.EDGE_REFRESH_SECRET }}" ]; then
-            echo "❌ Missing EDGE_REFRESH_SECRET"; exit 1;
+            echo "❌ Missing EDGE_REFRESH_SECRET (set in repo Settings → Secrets)"; exit 1;
           fi
-
           echo "✅ Secrets exist"
 
-      - name: Invoke Supabase Edge Function (POST)
+      - name: Invoke Supabase Edge Function (POST) with debug
         env:
           EDGE_URL: ${{ secrets.EDGE_REFRESH_URL }}
           EDGE_SECRET: ${{ secrets.EDGE_REFRESH_SECRET }}
         run: |
           set -euo pipefail
+
+          # print lengths so we can confirm secrets are reaching the runner (no secret value shown)
+          echo "DEBUG: EDGE_URL length = ${#EDGE_URL}"
+          echo "DEBUG: EDGE_SECRET length = ${#EDGE_SECRET}"
 
           echo "🚀 Calling Supabase Edge Function..."
           BODY='{"source":"github_actions"}'
@@ -40,10 +41,10 @@ jobs:
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
             -H "Content-Type: application/json" \
             -H "x-refresh-secret: $EDGE_SECRET" \
-            -d "$BODY")
+            -d "$BODY" || true)
 
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY_ONLY=$(echo "$RESPONSE" | sed '$d')
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1 || echo "")
+          BODY_ONLY=$(echo "$RESPONSE" | sed '$d' || echo "")
 
           echo "HTTP: $HTTP_CODE"
           echo "BODY:"
