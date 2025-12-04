@@ -3,47 +3,48 @@ name: refresh-matview
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'   # optional: hourly — change or remove as you like
+    - cron: '0 * * * *'    # optional: run hourly - change or remove as needed
+  push:
+    branches:
+      - main
 
 jobs:
   call-edge-refresh:
     runs-on: ubuntu-latest
+    env:
+      EDGE_URL: ${{ secrets.EDGE_REFRESH_URL }}
+      EDGE_SECRET: ${{ secrets.EDGE_REFRESH_SECRET }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Validate secrets (quick)
         run: |
-          if [ -z "${{ secrets.EDGE_REFRESH_URL }}" ]; then
-            echo "❌ Missing EDGE_REFRESH_URL (set to your Supabase Edge function URL)"; exit 1;
+          if [ -z "$EDGE_URL" ] || [ -z "$EDGE_SECRET" ]; then
+            echo "ERROR: EDGE_URL or EDGE_SECRET not set. Check repository secrets."
+            exit 2
           fi
-          if [ -z "${{ secrets.EDGE_REFRESH_SECRET }}" ]; then
-            echo "❌ Missing EDGE_REFRESH_SECRET (set to the refresh secret you created in Supabase)"; exit 1;
-          fi
-          echo "✅ required secrets present"
+          echo "DEBUG: EDGE_URL length = ${#EDGE_URL}"
+          echo "DEBUG: EDGE_SECRET length = ${#EDGE_SECRET}"
 
-      - name: Call Supabase Edge Function (x-refresh-secret)
-        env:
-          EDGE_URL: ${{ secrets.EDGE_REFRESH_URL }}
-          EDGE_SECRET: ${{ secrets.EDGE_REFRESH_SECRET }}
+      - name: Invoke Supabase Edge Function (x-refresh-secret)
+        id: call-edge
         run: |
           set -euo pipefail
-          BODY='{"source":"github_actions"}'
-          echo "Calling Supabase Edge Function with x-refresh-secret..."
-          # call and capture http code + body
-          R=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
-                -H "Content-Type: application/json" \
-                -H "x-refresh-secret: $EDGE_SECRET" \
-                -d "$BODY" || true)
-          HTTP=$(echo "$R" | tail -n1 || echo "")
-          RESP=$(echo "$R" | sed '$d' || echo "")
-          echo "HTTP: $HTTP"
+
+          echo "🚀 Calling Supabase Edge Function with x-refresh-secret..."
+          HTTP_STATUS=$(curl -s -o /tmp/edge_resp.txt -w "%{http_code}" -X POST "$EDGE_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-refresh-secret: $EDGE_SECRET" \
+            -d '{"source":"github_action"}' )
+
+          echo "HTTP: $HTTP_STATUS"
           echo "BODY:"
-          echo "$RESP"
-          if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
-            echo "✅ matview refreshed."
-            exit 0
-          else
-            echo "❌ Edge call failed with HTTP $HTTP"
+          cat /tmp/edge_resp.txt || true
+
+          if [ "$HTTP_STATUS" -ne 200 ] && [ "$HTTP_STATUS" -ne 201 ]; then
+            echo "⚠️ Edge call failed (HTTP $HTTP_STATUS). Failing job."
             exit 1
           fi
+
+          echo "Edge call succeeded."
