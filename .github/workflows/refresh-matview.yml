@@ -2,8 +2,6 @@ name: refresh-matview
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 * * * *'    # optional: run hourly - change or remove as needed
   push:
     branches:
       - main
@@ -12,39 +10,76 @@ jobs:
   call-edge-refresh:
     runs-on: ubuntu-latest
     env:
+      # (local names inside the job - these map to repository secrets below)
       EDGE_URL: ${{ secrets.EDGE_REFRESH_URL }}
       EDGE_SECRET: ${{ secrets.EDGE_REFRESH_SECRET }}
+      EDGE_BEARER: ${{ secrets.EDGE_REFRESH_BEARER }}
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Validate secrets (quick)
+      - name: Validate required secrets
         run: |
-          if [ -z "$EDGE_URL" ] || [ -z "$EDGE_SECRET" ]; then
-            echo "ERROR: EDGE_URL or EDGE_SECRET not set. Check repository secrets."
-            exit 2
-          fi
-          echo "DEBUG: EDGE_URL length = ${#EDGE_URL}"
-          echo "DEBUG: EDGE_SECRET length = ${#EDGE_SECRET}"
+          if [ -z "$EDGE_URL" ]; then echo "Missing EDGE_REFRESH_URL secret"; exit 1; fi
+          if [ -z "$EDGE_SECRET" ]; then echo "Missing EDGE_REFRESH_SECRET secret"; exit 1; fi
+          echo "Secrets present (not printing values)."
 
-      - name: Invoke Supabase Edge Function (x-refresh-secret)
-        id: call-edge
+      - name: Invoke Supabase Edge Function (try two header styles)
+        id: call_edge
         run: |
           set -euo pipefail
 
-          echo "🚀 Calling Supabase Edge Function with x-refresh-secret..."
-          HTTP_STATUS=$(curl -s -o /tmp/edge_resp.txt -w "%{http_code}" -X POST "$EDGE_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-refresh-secret: $EDGE_SECRET" \
-            -d '{"source":"github_action"}' )
+          echo "Calling Supabase Edge Function..."
 
-          echo "HTTP: $HTTP_STATUS"
-          echo "BODY:"
-          cat /tmp/edge_resp.txt || true
+          # Common POST payload (small json)
+          PAYLOAD='{"source":"github_actions","when":"'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"}'
 
-          if [ "$HTTP_STATUS" -ne 200 ] && [ "$HTTP_STATUS" -ne 201 ]; then
-            echo "⚠️ Edge call failed (HTTP $HTTP_STATUS). Failing job."
-            exit 1
+          # Helper to call and capture body + http code
+          call_edge() {
+            local hdr_name="$1"
+            local hdr_value="$2"
+
+            # Use curl to return body then status code on new line
+            resp=$(curl -sS -X POST "$EDGE_URL" \
+              -H "Content-Type: application/json" \
+              -H "$hdr_name: $hdr_value" \
+              -d "$PAYLOAD" \
+              -w '\\n%{http_code}')
+
+            # separate body and code
+            http_code=$(echo "$resp" | tail -n1)
+            body=$(echo "$resp" | sed '$d')
+
+            echo "HTTP: $http_code"
+            # show body but do not print secrets — body should not contain the secret
+            echo "BODY: $body"
+
+            echo "$http_code"
+          }
+
+          # Attempt 1: x-refresh-secret header
+          echo ">>> Attempt 1: header x-refresh-secret"
+          http_code=$(call_edge "x-refresh-secret" "$EDGE_SECRET")
+          if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+            echo "Attempt 1 succeeded (x-refresh-secret)."
+            exit 0
           fi
 
-          echo "Edge call succeeded."
+          # Attempt 2: Authorization Bearer (if secret provided)
+          if [ -n "${EDGE_BEARER:-}" ]; then
+            echo ">>> Attempt 2: Authorization: Bearer"
+            http_code=$(call_edge "Authorization" "Bearer $EDGE_BEARER")
+            if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+              echo "Attempt 2 succeeded (Authorization Bearer)."
+              exit 0
+            fi
+          else
+            echo "Skipping Attempt 2: EDGE_BEARER empty."
+          fi
+
+          echo "Both attempts failed. Please check the following:"
+          echo " - The REFRESH_SECRET value in your Supabase Edge Function environment must match EDGE_REFRESH_SECRET exactly."
+          echo " - If using bearer, EDGE_REFRESH_BEARER must be your SUPABASE SERVICE ROLE KEY (not anon key)."
+          echo " - Check function logs in Supabase Edge Functions -> refresh-matview -> Logs."
+          exit 1
