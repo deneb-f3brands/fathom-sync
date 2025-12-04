@@ -1,4 +1,4 @@
-name: refresh-matview
+name: refresh-matview-debug
 
 on:
   workflow_dispatch:
@@ -16,43 +16,57 @@ jobs:
       - name: Validate secrets (quick)
         run: |
           if [ -z "${{ secrets.EDGE_REFRESH_URL }}" ]; then
-            echo "❌ Missing EDGE_REFRESH_URL (set in repo Settings → Secrets)"; exit 1;
+            echo "❌ Missing EDGE_REFRESH_URL"; exit 1;
           fi
           if [ -z "${{ secrets.EDGE_REFRESH_SECRET }}" ]; then
-            echo "❌ Missing EDGE_REFRESH_SECRET (set in repo Settings → Secrets)"; exit 1;
+            echo "❌ Missing EDGE_REFRESH_SECRET"; exit 1;
           fi
           echo "✅ Secrets exist"
 
-      - name: Invoke Supabase Edge Function (POST) with debug
+      - name: Invoke Supabase Edge Function (try 2 header styles)
         env:
           EDGE_URL: ${{ secrets.EDGE_REFRESH_URL }}
           EDGE_SECRET: ${{ secrets.EDGE_REFRESH_SECRET }}
         run: |
           set -euo pipefail
 
-          # print lengths so we can confirm secrets are reaching the runner (no secret value shown)
           echo "DEBUG: EDGE_URL length = ${#EDGE_URL}"
           echo "DEBUG: EDGE_SECRET length = ${#EDGE_SECRET}"
+          BODY='{"source":"github_actions_debug"}'
 
-          echo "🚀 Calling Supabase Edge Function..."
-          BODY='{"source":"github_actions"}'
+          echo
+          echo ">>> Attempt 1: header x-refresh-secret"
+          R1=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
+               -H "Content-Type: application/json" \
+               -H "x-refresh-secret: $EDGE_SECRET" \
+               -d "$BODY" || true)
+          HTTP1=$(echo "$R1" | tail -n1 || echo "")
+          BODY1=$(echo "$R1" | sed '$d' || echo "")
+          echo "HTTP1: $HTTP1"
+          echo "BODY1:"
+          echo "$BODY1"
 
-          # call the edge function, include only x-refresh-secret header
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-refresh-secret: $EDGE_SECRET" \
-            -d "$BODY" || true)
+          echo
+          echo ">>> Attempt 2: Authorization: Bearer <secret>"
+          R2=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
+               -H "Content-Type: application/json" \
+               -H "Authorization: Bearer $EDGE_SECRET" \
+               -d "$BODY" || true)
+          HTTP2=$(echo "$R2" | tail -n1 || echo "")
+          BODY2=$(echo "$R2" | sed '$d' || echo "")
+          echo "HTTP2: $HTTP2"
+          echo "BODY2:"
+          echo "$BODY2"
 
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1 || echo "")
-          BODY_ONLY=$(echo "$RESPONSE" | sed '$d' || echo "")
+          echo
+          echo "Summary:"
+          echo "  attempt 1 (x-refresh-secret) -> HTTP $HTTP1"
+          echo "  attempt 2 (Authorization Bearer) -> HTTP $HTTP2"
 
-          echo "HTTP: $HTTP_CODE"
-          echo "BODY:"
-          echo "$BODY_ONLY"
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "❌ Failed with HTTP $HTTP_CODE"
+          if [ "$HTTP1" = "200" ] || [ "$HTTP2" = "200" ]; then
+            echo "✅ One of the header styles succeeded."
+            exit 0
+          else
+            echo "❌ Both header styles failed."
             exit 1
           fi
-
-          echo "✅ Edge function call successful"
