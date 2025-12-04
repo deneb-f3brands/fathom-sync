@@ -1,9 +1,10 @@
 name: refresh-matview
 
+# Trigger manually or on push to main (you can remove push if you only want manual runs)
 on:
-  push:
-    branches: [ "main" ]
   workflow_dispatch:
+  push:
+    branches: [ main ]
 
 jobs:
   call-edge-refresh:
@@ -18,59 +19,57 @@ jobs:
 
       - name: Validate required secrets
         run: |
-          # fail fast if any required secret is empty
-          if [ -z "$EDGE_REFRESH_URL" ] || [ -z "$EDGE_REFRESH_SECRET" ]; then
-            echo "ERROR: EDGE_REFRESH_URL and EDGE_REFRESH_SECRET must be set as repo secrets."
-            exit 1
-          fi
-          # show masked lengths for debugging (no secrets printed)
-          echo "EDGE_REFRESH_URL length: $(echo -n "$EDGE_REFRESH_URL" | wc -c)"
-          echo "EDGE_REFRESH_SECRET length: $(echo -n "$EDGE_REFRESH_SECRET" | wc -c)"
-          echo "EDGE_REFRESH_BEARER length: $(echo -n "$EDGE_REFRESH_BEARER" | wc -c)"
+          set -euo pipefail
+          missing=0
+          if [ -z "${EDGE_REFRESH_URL:-}" ]; then echo "ERROR: EDGE_REFRESH_URL secret is missing"; missing=1; fi
+          if [ -z "${EDGE_REFRESH_SECRET:-}" ]; then echo "WARN: EDGE_REFRESH_SECRET secret is empty (bearer test will still run)"; fi
+          if [ -z "${EDGE_REFRESH_BEARER:-}" ]; then echo "WARN: EDGE_REFRESH_BEARER secret is empty (x-refresh-secret must be used)"; fi
+          if [ "$missing" -eq 1 ]; then exit 1; fi
+          echo "Secrets present (masked)."
 
-      - name: Call Supabase Edge Function (try x-refresh-secret then Bearer fallback)
+      - name: Call Supabase Edge Function (try x-refresh-secret then Authorization Bearer)
         id: call_edge
         run: |
           set -euo pipefail
+          URL="$EDGE_REFRESH_URL"
+          BODY='{"source":"github_actions"}'
 
-          echo "Calling Supabase Edge Function with x-refresh-secret..."
-          HTTP1=$(curl -sS -o response1.txt -w "%{http_code}" -X POST "$EDGE_REFRESH_URL" \
+          echo "Calling Supabase Edge Function..."
+
+          # Attempt 1: x-refresh-secret header
+          echo ">>> Attempt 1: header x-refresh-secret"
+          HTTP1=$(curl -sS -o /tmp/resp1 -w "%{http_code}" -X POST "$URL" \
             -H "Content-Type: application/json" \
             -H "x-refresh-secret: $EDGE_REFRESH_SECRET" \
-            -d '{"source":"github_actions_x_header"}' || true)
-
-          echo "--- Response for x-refresh-secret attempt ---"
-          echo "HTTP code: $HTTP1"
-          echo "Body:"
-          sed -n '1,200p' response1.txt || true
-          echo "--------------------------------------------"
-
-          if [[ "$HTTP1" =~ ^2 ]]; then
-            echo "Success: x-refresh-secret attempt returned $HTTP1"
+            -d "$BODY" || true)
+          echo "HTTP1: $HTTP1"
+          if [ "$HTTP1" = "200" ]; then
+            echo "Success: x-refresh-secret returned 200"
+            cat /tmp/resp1
             exit 0
+          else
+            echo "x-refresh-secret attempt failed (HTTP $HTTP1). Response:"
+            cat /tmp/resp1 || true
           fi
 
-          echo "x-refresh-secret attempt failed (HTTP $HTTP1). Trying Authorization Bearer..."
-
-          HTTP2=$(curl -sS -o response2.txt -w "%{http_code}" -X POST "$EDGE_REFRESH_URL" \
+          # Attempt 2: Authorization Bearer header
+          echo ">>> Attempt 2: Authorization: Bearer <token>"
+          HTTP2=$(curl -sS -o /tmp/resp2 -w "%{http_code}" -X POST "$URL" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $EDGE_REFRESH_BEARER" \
-            -d '{"source":"github_actions_bearer"}' || true)
-
-          echo "--- Response for Authorization Bearer attempt ---"
-          echo "HTTP code: $HTTP2"
-          echo "Body:"
-          sed -n '1,200p' response2.txt || true
-          echo "-------------------------------------------------"
-
-          if [[ "$HTTP2" =~ ^2 ]]; then
-            echo "Success: Bearer attempt returned $HTTP2"
+            -d "$BODY" || true)
+          echo "HTTP2: $HTTP2"
+          if [ "$HTTP2" = "200" ]; then
+            echo "Success: Authorization Bearer returned 200"
+            cat /tmp/resp2
             exit 0
+          else
+            echo "Authorization Bearer attempt failed (HTTP $HTTP2). Response:"
+            cat /tmp/resp2 || true
           fi
 
-          echo "Both attempts failed."
-          echo "Please check:"
-          echo " - EDGE_REFRESH_SECRET in GitHub matches REFRESH_SECRET in the Edge Function exactly (no trailing newline)."
-          echo " - EDGE_REFRESH_BEARER contains the SUPABASE SERVICE ROLE KEY (not anon key) if using bearer."
-          echo " - EDGE_REFRESH_URL must be the full edge function URL (include /functions/v1/refresh-matview if that's how you call it)."
+          echo "Both attempts failed. Exiting with error so you can inspect outputs above."
           exit 1
+
+      - name: Complete
+        run: echo "Done"
