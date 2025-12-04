@@ -1,17 +1,67 @@
-name: refresh-matview - sanity test
+name: refresh-matview
 
+# triggers: manual, push, and hourly schedule (adjust cron as needed)
 on:
   workflow_dispatch: {}
+  push:
+    branches:
+      - main
   schedule:
-    - cron: '0 */1 * * *'   # hourly (you can remove schedule if you want manual runs only)
+    - cron: '0 * * * *'   # top of every hour (change if you want)
 
 jobs:
-  sanity:
+  call-edge-refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
-      - name: Show shell and date
+      - name: Job info
         run: |
-          echo "Sanity workflow started"
-          uname -a
-          date
-          echo "Done"
+          echo "Run on: $(uname -a)"
+          echo "Date: $(date -u)"
+
+      - name: Invoke Supabase Edge Function (POST)
+        id: call
+        env:
+          EDGE_URL: ${{ secrets.EDGE_REFRESH_URL }}
+          EDGE_SECRET: ${{ secrets.EDGE_REFRESH_SECRET }}
+        run: |
+          if [ -z "$EDGE_URL" ] || [ -z "$EDGE_SECRET" ]; then
+            echo "ERROR: EDGE_URL or EDGE_SECRET is missing. Check repo secrets."
+            exit 2
+          fi
+
+          echo "Calling $EDGE_URL ..."
+          # Send an explicit JSON body so Supabase invocation logs include it (optional)
+          BODY='{"triggered_by":"github_actions","run_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
+
+          # call the edge function; capture status and body
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-refresh-secret: $EDGE_SECRET" \
+            -d "$BODY" )
+
+          # separate body and http code
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY_ONLY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "HTTP: $HTTP_CODE"
+          echo "Response body:"
+          echo "$BODY_ONLY"
+          echo "::set-output name=code::$HTTP_CODE"
+          echo "::set-output name=body::$BODY_ONLY"
+
+          # fail if not 200 (or change to accept 202,204 if your function uses those)
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Edge call failed (HTTP $HTTP_CODE). Failing job."
+            exit 5
+          fi
+
+      - name: Show summary (parsed)
+        if: always()
+        run: |
+          echo "=== raw response ==="
+          echo "${{ steps.call.outputs.body }}"
+          # optional: try to extract message or counts with jq if present
+          echo "Attempting to parse JSON summary (if present):"
+          echo "${{ steps.call.outputs.body }}" | jq -r '.message, .summary' || true
