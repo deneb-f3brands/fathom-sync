@@ -20,16 +20,38 @@ jobs:
           echo "Run on: $(uname -a)"
           echo "Date: $(date -u)"
 
-      - name: Invoke Supabase Edge Function (POST)
-        id: call
+            - name: Invoke Supabase Edge Function (POST)
+        id: call-edge-refresh
         env:
           EDGE_URL: ${{ secrets.EDGE_REFRESH_URL }}
           EDGE_SECRET: ${{ secrets.EDGE_REFRESH_SECRET }}
         run: |
-          if [ -z "$EDGE_URL" ] || [ -z "$EDGE_SECRET" ]; then
-            echo "ERROR: EDGE_URL or EDGE_SECRET is missing. Check repo secrets."
-            exit 2
+          set -euo pipefail
+
+          echo "Calling Supabase Edge Function..."
+
+          # Build JSON body
+          BODY='{"triggered_by":"github_actions"}'
+
+          # Run curl with BOTH possible authorization styles
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-refresh-secret: $EDGE_SECRET" \
+            -H "Authorization: Bearer $EDGE_SECRET" \
+            -d "$BODY")
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY_ONLY=$(echo "$RESPONSE" | sed '$d')
+
+          echo "HTTP: $HTTP_CODE"
+          echo "BODY:"
+          echo "$BODY_ONLY"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Failed with HTTP $HTTP_CODE"
+            exit 1
           fi
+
 
           echo "Calling $EDGE_URL ..."
           # Send an explicit JSON body so Supabase invocation logs include it (optional)
