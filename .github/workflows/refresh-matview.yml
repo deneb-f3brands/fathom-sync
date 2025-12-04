@@ -36,10 +36,10 @@ jobs:
           echo "🚀 Calling Supabase Edge Function..."
           BODY='{"source":"github_actions"}'
 
+          # call the edge function, include only x-refresh-secret header
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
             -H "Content-Type: application/json" \
             -H "x-refresh-secret: $EDGE_SECRET" \
-            -H "Authorization: Bearer $EDGE_SECRET" \
             -d "$BODY")
 
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
