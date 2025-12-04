@@ -2,6 +2,8 @@ name: refresh-matview
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"   # runs every hour (UTC)
   push:
     branches: [ main ]
 
