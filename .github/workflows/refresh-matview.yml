@@ -1,6 +1,5 @@
 name: refresh-matview
 
-# Trigger manually or on push to main (you can remove push if you only want manual runs)
 on:
   workflow_dispatch:
   push:
@@ -22,8 +21,8 @@ jobs:
           set -euo pipefail
           missing=0
           if [ -z "${EDGE_REFRESH_URL:-}" ]; then echo "ERROR: EDGE_REFRESH_URL secret is missing"; missing=1; fi
-          if [ -z "${EDGE_REFRESH_SECRET:-}" ]; then echo "WARN: EDGE_REFRESH_SECRET secret is empty (bearer test will still run)"; fi
-          if [ -z "${EDGE_REFRESH_BEARER:-}" ]; then echo "WARN: EDGE_REFRESH_BEARER secret is empty (x-refresh-secret must be used)"; fi
+          if [ -z "${EDGE_REFRESH_SECRET:-}" ]; then echo "WARN: EDGE_REFRESH_SECRET is empty (bearer fallback will run)"; fi
+          if [ -z "${EDGE_REFRESH_BEARER:-}" ]; then echo "WARN: EDGE_REFRESH_BEARER is empty (x-refresh-secret must be used)"; fi
           if [ "$missing" -eq 1 ]; then exit 1; fi
           echo "Secrets present (masked)."
 
