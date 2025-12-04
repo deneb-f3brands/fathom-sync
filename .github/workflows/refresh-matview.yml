@@ -1,39 +1,41 @@
 name: refresh-matview
 
-# triggers: manual, push, and hourly schedule (adjust cron as needed)
 on:
-  workflow_dispatch: {}
   push:
     branches:
       - main
-  schedule:
-    - cron: '0 * * * *'   # top of every hour (change if you want)
+  workflow_dispatch:
 
 jobs:
   call-edge-refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
-      - name: Job info
-        run: |
-          echo "Run on: $(uname -a)"
-          echo "Date: $(date -u)"
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-            - name: Invoke Supabase Edge Function (POST)
-        id: call-edge-refresh
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.EDGE_REFRESH_URL }}" ]; then
+            echo "❌ Missing EDGE_REFRESH_URL"; exit 1;
+          fi
+
+          if [ -z "${{ secrets.EDGE_REFRESH_SECRET }}" ]; then
+            echo "❌ Missing EDGE_REFRESH_SECRET"; exit 1;
+          fi
+
+          echo "✅ Secrets exist"
+
+      - name: Invoke Supabase Edge Function (POST)
         env:
           EDGE_URL: ${{ secrets.EDGE_REFRESH_URL }}
           EDGE_SECRET: ${{ secrets.EDGE_REFRESH_SECRET }}
         run: |
           set -euo pipefail
 
-          echo "Calling Supabase Edge Function..."
+          echo "🚀 Calling Supabase Edge Function..."
+          BODY='{"source":"github_actions"}'
 
-          # Build JSON body
-          BODY='{"triggered_by":"github_actions"}'
-
-          # Run curl with BOTH possible authorization styles
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
             -H "Content-Type: application/json" \
             -H "x-refresh-secret: $EDGE_SECRET" \
@@ -48,42 +50,8 @@ jobs:
           echo "$BODY_ONLY"
 
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "Failed with HTTP $HTTP_CODE"
+            echo "❌ Failed with HTTP $HTTP_CODE"
             exit 1
           fi
 
-
-          echo "Calling $EDGE_URL ..."
-          # Send an explicit JSON body so Supabase invocation logs include it (optional)
-          BODY='{"triggered_by":"github_actions","run_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
-
-          # call the edge function; capture status and body
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
-            -H "Content-Type: application/json" \
-            -H "x-refresh-secret: $EDGE_SECRET" \
-            -d "$BODY" )
-
-          # separate body and http code
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY_ONLY=$(echo "$RESPONSE" | sed '$d')
-
-          echo "HTTP: $HTTP_CODE"
-          echo "Response body:"
-          echo "$BODY_ONLY"
-          echo "::set-output name=code::$HTTP_CODE"
-          echo "::set-output name=body::$BODY_ONLY"
-
-          # fail if not 200 (or change to accept 202,204 if your function uses those)
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "Edge call failed (HTTP $HTTP_CODE). Failing job."
-            exit 5
-          fi
-
-      - name: Show summary (parsed)
-        if: always()
-        run: |
-          echo "=== raw response ==="
-          echo "${{ steps.call.outputs.body }}"
-          # optional: try to extract message or counts with jq if present
-          echo "Attempting to parse JSON summary (if present):"
-          echo "${{ steps.call.outputs.body }}" | jq -r '.message, .summary' || true
+          echo "✅ Edge function call successful"
