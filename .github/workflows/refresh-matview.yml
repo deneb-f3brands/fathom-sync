@@ -1,77 +1,17 @@
-name: refresh-matview
+name: refresh-matview - sanity test
 
 on:
-  schedule:
-    - cron: '0 */1 * * *'   # every hour
   workflow_dispatch: {}
+  schedule:
+    - cron: '0 */1 * * *'   # hourly (you can remove schedule if you want manual runs only)
 
 jobs:
-  refresh:
+  sanity:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Start
-        run: echo "Starting matview refresh job at $(date)"
-
-      - name: Refresh matview (with retries)
-        env:
-          EDGE_URL: ${{ secrets.EDGE_FUNCTION_URL }}
-          REFRESH_SECRET: ${{ secrets.REFRESH_SECRET }}
+      - name: Show shell and date
         run: |
-          set -euo pipefail
-          attempt=0
-          max=3
-          wait_seconds=5
-
-          if [ -z "${EDGE_URL:-}" ]; then
-            echo "::error::EDGE_FUNCTION_URL secret is empty. Set it in repo secrets."
-            exit 1
-          fi
-
-          while [ $attempt -lt $max ]; do
-            attempt=$((attempt+1))
-            echo "Attempt $attempt/$max -> POST $EDGE_URL"
-            # curl: print http code appended; body is everything before last 3 chars
-            resp="$(curl -s -w '%{http_code}' -X POST "$EDGE_URL" \
-              -H "x-refresh-secret: $REFRESH_SECRET" \
-              -H "Content-Type: application/json" \
-              -d '{}' )" || true
-            code="${resp: -3}"
-            body="${resp:0:${#resp}-3}"
-            echo "HTTP code: $code"
-            echo "Body: $body"
-            if [ "$code" = "200" ]; then
-              echo "Refresh succeeded on attempt $attempt"
-              printf '%s\n' "$body" > refresh_result.json
-              exit 0
-            fi
-            echo "Refresh failed (HTTP $code)."
-            if [ $attempt -lt $max ]; then
-              echo "Sleeping $wait_seconds seconds before retry..."
-              sleep $wait_seconds
-              wait_seconds=$((wait_seconds * 2))
-            fi
-          done
-
-          echo "::error::All attempts failed. Last HTTP code: $code"
-          printf '%s\n' "$body"
-          exit 1
-
-      - name: Optional: post Slack alert on failure
-        if: failure()
-        env:
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-        run: |
-          if [ -z "${SLACK_WEBHOOK:-}" ]; then
-            echo "No SLACK_WEBHOOK secret set; skipping Slack notify"
-            exit 0
-          fi
-          msg="Matview refresh FAILED on $(date) for ${EDGE_URL:-<unknown>} (repo: $GITHUB_REPOSITORY)"
-          # build JSON safely and post
-          cat <<EOF > /tmp/slack_payload.json
-{"text": "${msg}"}
-EOF
-          curl -s -X POST -H 'Content-Type: application/json' --data @/tmp/slack_payload.json "$SLACK_WEBHOOK" || echo "Slack notify failed"
-
-      - name: Done
-        run: echo "Workflow finished at $(date)"
+          echo "Sanity workflow started"
+          uname -a
+          date
+          echo "Done"
