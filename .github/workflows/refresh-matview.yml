@@ -2,12 +2,13 @@ name: refresh-matview
 
 on:
   schedule:
-    - cron: '0 */1 * * *'   # every hour, change if you want (cron)
-  workflow_dispatch: {}     # allows manual run from Actions UI
+    - cron: '0 */1 * * *'   # every hour
+  workflow_dispatch: {}
 
 jobs:
   refresh:
     runs-on: ubuntu-latest
+
     steps:
       - name: Start
         run: echo "Starting matview refresh job at $(date)"
@@ -21,10 +22,16 @@ jobs:
           attempt=0
           max=3
           wait_seconds=5
+
+          if [ -z "${EDGE_URL:-}" ]; then
+            echo "::error::EDGE_FUNCTION_URL secret is empty. Set it in repo secrets."
+            exit 1
+          fi
+
           while [ $attempt -lt $max ]; do
             attempt=$((attempt+1))
             echo "Attempt $attempt/$max -> POST $EDGE_URL"
-            # post and capture output + http code appended
+            # curl: print http code appended; body is everything before last 3 chars
             resp="$(curl -s -w '%{http_code}' -X POST "$EDGE_URL" \
               -H "x-refresh-secret: $REFRESH_SECRET" \
               -H "Content-Type: application/json" \
@@ -35,7 +42,7 @@ jobs:
             echo "Body: $body"
             if [ "$code" = "200" ]; then
               echo "Refresh succeeded on attempt $attempt"
-              echo "$body" > refresh_result.json
+              printf '%s\n' "$body" > refresh_result.json
               exit 0
             fi
             echo "Refresh failed (HTTP $code)."
@@ -45,8 +52,9 @@ jobs:
               wait_seconds=$((wait_seconds * 2))
             fi
           done
+
           echo "::error::All attempts failed. Last HTTP code: $code"
-          echo "$body"
+          printf '%s\n' "$body"
           exit 1
 
       - name: Optional: post Slack alert on failure
@@ -58,9 +66,12 @@ jobs:
             echo "No SLACK_WEBHOOK secret set; skipping Slack notify"
             exit 0
           fi
-          msg="Matview refresh FAILED on $(date) for ${{ secrets.EDGE_FUNCTION_URL }}. Repo: $GITHUB_REPOSITORY"
-          payload="$(jq -n --arg t "$msg" '{text:$t}')" || payload="{\"text\":\"$msg\"}"
-          curl -s -X POST -H 'Content-Type: application/json' --data "$payload" "$SLACK_WEBHOOK" || echo "Slack notify failed"
+          msg="Matview refresh FAILED on $(date) for ${EDGE_URL:-<unknown>} (repo: $GITHUB_REPOSITORY)"
+          # build JSON safely and post
+          cat <<EOF > /tmp/slack_payload.json
+{"text": "${msg}"}
+EOF
+          curl -s -X POST -H 'Content-Type: application/json' --data @/tmp/slack_payload.json "$SLACK_WEBHOOK" || echo "Slack notify failed"
 
       - name: Done
         run: echo "Workflow finished at $(date)"
