@@ -1,7 +1,9 @@
-name: refresh-matview-debug
+name: refresh-matview
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'   # optional: run hourly; remove or change as you like
   push:
     branches:
       - main
@@ -16,57 +18,34 @@ jobs:
       - name: Validate secrets (quick)
         run: |
           if [ -z "${{ secrets.EDGE_REFRESH_URL }}" ]; then
-            echo "❌ Missing EDGE_REFRESH_URL"; exit 1;
+            echo "❌ Missing EDGE_REFRESH_URL (set to your Supabase Edge function URL)"; exit 1;
           fi
-          if [ -z "${{ secrets.EDGE_REFRESH_SECRET }}" ]; then
-            echo "❌ Missing EDGE_REFRESH_SECRET"; exit 1;
+          if [ -z "${{ secrets.EDGE_REFRESH_BEARER }}" ]; then
+            echo "❌ Missing EDGE_REFRESH_BEARER (set to your Supabase service_role key)"; exit 1;
           fi
           echo "✅ Secrets exist"
 
-      - name: Invoke Supabase Edge Function (try 2 header styles)
+      - name: Call Supabase Edge Function (Authorization Bearer)
         env:
           EDGE_URL: ${{ secrets.EDGE_REFRESH_URL }}
-          EDGE_SECRET: ${{ secrets.EDGE_REFRESH_SECRET }}
+          EDGE_BEARER: ${{ secrets.EDGE_REFRESH_BEARER }}
         run: |
           set -euo pipefail
-
-          echo "DEBUG: EDGE_URL length = ${#EDGE_URL}"
-          echo "DEBUG: EDGE_SECRET length = ${#EDGE_SECRET}"
-          BODY='{"source":"github_actions_debug"}'
-
-          echo
-          echo ">>> Attempt 1: header x-refresh-secret"
-          R1=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
-               -H "Content-Type: application/json" \
-               -H "x-refresh-secret: $EDGE_SECRET" \
-               -d "$BODY" || true)
-          HTTP1=$(echo "$R1" | tail -n1 || echo "")
-          BODY1=$(echo "$R1" | sed '$d' || echo "")
-          echo "HTTP1: $HTTP1"
-          echo "BODY1:"
-          echo "$BODY1"
-
-          echo
-          echo ">>> Attempt 2: Authorization: Bearer <secret>"
-          R2=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
-               -H "Content-Type: application/json" \
-               -H "Authorization: Bearer $EDGE_SECRET" \
-               -d "$BODY" || true)
-          HTTP2=$(echo "$R2" | tail -n1 || echo "")
-          BODY2=$(echo "$R2" | sed '$d' || echo "")
-          echo "HTTP2: $HTTP2"
-          echo "BODY2:"
-          echo "$BODY2"
-
-          echo
-          echo "Summary:"
-          echo "  attempt 1 (x-refresh-secret) -> HTTP $HTTP1"
-          echo "  attempt 2 (Authorization Bearer) -> HTTP $HTTP2"
-
-          if [ "$HTTP1" = "200" ] || [ "$HTTP2" = "200" ]; then
-            echo "✅ One of the header styles succeeded."
+          BODY='{"source":"github_actions"}'
+          echo "Calling Supabase Edge Function (Authorization: Bearer <token>)..."
+          R=$(curl -s -w "\n%{http_code}" -X POST "$EDGE_URL" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $EDGE_BEARER" \
+                -d "$BODY" || true)
+          HTTP=$(echo "$R" | tail -n1 || echo "")
+          RESP=$(echo "$R" | sed '$d' || echo "")
+          echo "HTTP: $HTTP"
+          echo "BODY:"
+          echo "$RESP"
+          if [ "$HTTP" = "200" ] || [ "$HTTP" = "201" ]; then
+            echo "✅ matview refreshed."
             exit 0
           else
-            echo "❌ Both header styles failed."
+            echo "❌ Edge call failed with HTTP $HTTP"
             exit 1
           fi
